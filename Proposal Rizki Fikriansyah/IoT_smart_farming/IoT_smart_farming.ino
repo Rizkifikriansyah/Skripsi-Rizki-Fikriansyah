@@ -1,196 +1,188 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include "soc/soc.h"
-#include "soc/rtc_cntl_reg.h"
-#include "esp_camera.h"
 #include <UniversalTelegramBot.h>
 #include <ArduinoJson.h>
 #include <TinyGPSPlus.h>
 
-const char* ssid = "rizki";
-const char* password = "25022025";
+// ========== WIFI ==========
+const char* ssid = "Kiki S.Kom";
+const char* password = "22222222";
 
-String BOTtoken = "ISI_BOT_TOKEN";
-String CHAT_ID  = "ISI_CHAT_ID";
+// ========== TELEGRAM ==========
+String BOTtoken = "8733038130:AAE-INunOp97XEmmbhg661vw7vQfqmNgmV8"; 
+String CHAT_ID  = "8518442862";
 
 WiFiClientSecure clientTCP;
 UniversalTelegramBot bot(BOTtoken, clientTCP);
 
+// ========== GPS ==========
 TinyGPSPlus gps;
-#define gpsSerial Serial2
+HardwareSerial gpsSerial(2);
 
+#define GPS_RX 16
+#define GPS_TX 17
+
+// ========== LED ==========
 #define FLASH_LED_PIN 4
-bool flashState = LOW;
 
-bool sendPhoto = false;
-
+// ========== VARIABEL ==========
+unsigned long lastTimeBotRan = 0;
 int botRequestDelay = 1000;
-unsigned long lastTimeBotRan;
 
-// ================= CAMERA PIN CONFIG (AI THINKER) =================
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
-// ================================================================
+unsigned long lastGpsPrint = 0;
+const unsigned long gpsPrintInterval = 3000;
 
-void configInitCamera() {
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer   = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href  = HREF_GPIO_NUM;
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn  = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
+bool gpsDetected = false;
+unsigned long lastSerialCheck = 0;
 
-  if (psramFound()) {
-    config.frame_size   = FRAMESIZE_UXGA;
-    config.jpeg_quality = 10;
-    config.fb_count     = 2;
-  } else {
-    config.frame_size   = FRAMESIZE_SVGA;
-    config.jpeg_quality = 12;
-    config.fb_count     = 1;
-  }
-
-  if (esp_camera_init(&config) != ESP_OK) {
-    Serial.println("Camera init failed");
-    ESP.restart();
-  }
-}
-
-void handleNewMessages(int numNewMessages) {
-  for (int i = 0; i < numNewMessages; i++) {
-    String text = bot.messages[i].text;
-    
-    if (text == "/photo") {
-      sendPhoto = true;
-    }
-
-    if (text == "/flash") {
-      flashState = !flashState;
-      digitalWrite(FLASH_LED_PIN, flashState);
-    }
-  }
-}
-
-String sendPhotoTelegram() {
-  camera_fb_t * fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("Camera capture failed");
-    return "Capture failed";
-  }
-
-  if (clientTCP.connect("api.telegram.org", 443)) {
-    String head = "--boundary\r\nContent-Disposition: form-data; name=\"chat_id\";\r\n\r\n" + CHAT_ID +
-                  "\r\n--boundary\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"image.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n";
-
-    String tail = "\r\n--boundary--\r\n";
-
-    clientTCP.println("POST /bot" + BOTtoken + "/sendPhoto HTTP/1.1");
-    clientTCP.println("Host: api.telegram.org");
-    clientTCP.println("Content-Type: multipart/form-data; boundary=boundary");
-    clientTCP.println("Content-Length: " + String(fb->len + head.length() + tail.length()));
-    clientTCP.println();
-    clientTCP.print(head);
-    clientTCP.write(fb->buf, fb->len);
-    clientTCP.print(tail);
-
-    esp_camera_fb_return(fb);
-  }
-
-  clientTCP.stop();
-  return "Photo sent";
-}
-
-void sendGPSLocation() {
-  if (gps.location.isValid()) {
-    String message = "Lokasi Ternak:\n";
-    message += "Lat: " + String(gps.location.lat(), 6) + "\n";
-    message += "Lng: " + String(gps.location.lng(), 6);
-
-    bot.sendMessage(CHAT_ID, message, "");
-  }
-}
-
+// ================= SETUP =================
 void setup() {
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
-
   Serial.begin(115200);
-  gpsSerial.begin(9600, SERIAL_8N1, 16, 17);  // GPS RX, TX
+  delay(1000);
 
+  Serial.println("\n===== ESP32 GPS + TELEGRAM =====");
+
+  // LED
   pinMode(FLASH_LED_PIN, OUTPUT);
-  digitalWrite(FLASH_LED_PIN, flashState);
 
-  configInitCamera();
-
+  // WiFi
   WiFi.begin(ssid, password);
+  Serial.print("Connecting WiFi");
+
+  int retry = 0;
+  while (WiFi.status() != WL_CONNECTED && retry < 30) {
+    delay(3000);
+    Serial.print(".");
+    retry++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ WiFi Connected");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n❌ WiFi Failed");
+  }
+
+  // Telegram
   clientTCP.setInsecure();
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
+  // GPS
+  gpsSerial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
+  Serial.println("GPS Ready");
 
-  Serial.println("\nWiFi Connected");
+  Serial.println("System Ready 🚀");
 }
 
+// ================= LOOP =================
 void loop() {
 
-  // ===== READ GPS =====
+  // Baca GPS
   while (gpsSerial.available()) {
     gps.encode(gpsSerial.read());
+    gpsDetected = true;
   }
 
-  // ===== HANDLE PHOTO REQUEST =====
-  if (sendPhoto) {
-    sendPhotoTelegram();
-    sendPhoto = false;
+  // Warning jika GPS tidak terbaca
+  if (millis() > 10000 && gps.charsProcessed() < 10 && !gpsDetected) {
+    Serial.println("⚠️ GPS tidak terdeteksi!");
+    gpsDetected = true;
   }
 
-  // ===== TELEGRAM BOT =====
-  if (millis() > lastTimeBotRan + botRequestDelay) {
-    int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+  // Print GPS tiap 3 detik
+  if (millis() - lastGpsPrint > gpsPrintInterval) {
+    printGpsInfo();
+    lastGpsPrint = millis();
+  }
 
-    while (numNewMessages) {
-      handleNewMessages(numNewMessages);
-      numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+  // Telegram
+  if (WiFi.status() == WL_CONNECTED) {
+    if (millis() - lastTimeBotRan > botRequestDelay) {
+      int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+
+      while (numNewMessages) {
+        handleNewMessages(numNewMessages);
+        numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+      }
+
+      lastTimeBotRan = millis();
+    }
+  }
+
+  delay(10);
+}
+
+// ================= GPS INFO =================
+void printGpsInfo() {
+  Serial.println("\n=== GPS INFO ===");
+
+  if (!gps.location.isValid()) {
+    Serial.println("Menunggu GPS fix...");
+    return;
+  }
+
+  Serial.print("Lat: ");
+  Serial.println(gps.location.lat(), 6);
+
+  Serial.print("Lng: ");
+  Serial.println(gps.location.lng(), 6);
+
+  Serial.print("Satelit: ");
+  Serial.println(gps.satellites.value());
+}
+
+// ================= TELEGRAM =================
+void handleNewMessages(int numNewMessages) {
+  for (int i = 0; i < numNewMessages; i++) {
+
+    String chat_id = String(bot.messages[i].chat_id);
+    String text = bot.messages[i].text;
+
+    if (chat_id != CHAT_ID) {
+      bot.sendMessage(chat_id, "Unauthorized", "");
+      continue;
     }
 
-    lastTimeBotRan = millis();
+    if (text == "/start") {
+      bot.sendMessage(CHAT_ID,
+        "🤖 ESP32 GPS Bot\n\n"
+        "/location - Lokasi\n"
+        "/status - Status",
+        "");
+    }
+
+    else if (text == "/location") {
+      sendLocationToTelegram();
+    }
+
+    else if (text == "/status") {
+      String msg = "WiFi: ";
+      msg += (WiFi.status() == WL_CONNECTED) ? "Connected" : "Disconnected";
+      bot.sendMessage(CHAT_ID, msg, "");
+    }
+  }
+}
+
+// ================= KIRIM LOKASI =================
+void sendLocationToTelegram() {
+
+  if (!gps.location.isValid()) {
+    bot.sendMessage(CHAT_ID, "❌ GPS belum dapat lokasi", "");
+    return;
   }
 
-  // ===== PERIODIC GPS SEND (SMART FARMING FUNCTION) =====
-  static unsigned long lastGPS = 0;
-  if (millis() - lastGPS > 10000) {   // kirim tiap 10 detik
-    sendGPSLocation();
-    lastGPS = millis();
-  }
+  String latStr = String(gps.location.lat(), 6);
+  String lngStr = String(gps.location.lng(), 6);
+
+  String msg = "📍 Lokasi Sapi\n";
+  msg += "Lat: " + latStr + "\n";
+  msg += "Lng: " + lngStr + "\n";
+
+  bot.sendMessage(CHAT_ID, msg, "");
+
+  String mapsLink = "https://www.google.com/maps?q=" + latStr + "," + lngStr;
+
+  bot.sendMessage(CHAT_ID, mapsLink, "");
+
+  Serial.println("Lokasi terkirim");
 }
